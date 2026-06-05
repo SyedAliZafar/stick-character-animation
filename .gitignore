@@ -1,0 +1,45 @@
+# Python / uv
+backend/.venv/
+backend/__pycache__/
+backend/*.pyc
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+dist/
+build/
+.uv/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Pipeline outputs (generated files, not source)
+outputs/images/
+outputs/videos/
+inputs/
+
+# Pipeline state (auto-regenerated per run)
+data/
+
+# API keys / secrets
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
+*.suo
+*.user
+
+# Logs
+*.log
+npm-debug.log*
