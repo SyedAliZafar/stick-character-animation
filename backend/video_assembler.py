@@ -112,8 +112,10 @@ async def _build_video(
         "-i", str(audio_path),
         "-filter_complex", filter_chain,
         "-map", "[v]", "-map", "1:a",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:v", "libx264", "-r", "24", "-preset", "fast", "-crf", "23",
+        "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
         "-shortest",
         str(output_path),
     ]

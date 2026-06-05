@@ -21,7 +21,7 @@ npm run dev
 
 - **OpenRouter API key** — entered in the Stage 5 UI, stored in localStorage
   - Used for: Gemini 2.5 Flash image generation via OpenRouter
-  - Cost: ~$0.02 per scene
+  - Cost: ~$0.039 per scene
 
 ## Pipeline Stages
 
