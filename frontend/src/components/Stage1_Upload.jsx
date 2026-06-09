@@ -105,8 +105,8 @@ export default function Stage1_Upload() {
           onFile={setTxtFile}
         />
         <FileDropZone
-          accept=".mp4,.m4a,.mov"
-          label="Audio/Video (.mp4)"
+          accept=".mp4,.m4a,.mov,.mp3,.wav,.ogg,.flac,.aac,.webm"
+          label="Audio/Video (.mp4, .mp3, .wav …)"
           icon="🎙️"
           file={mp4File}
           onFile={setMp4File}
