@@ -1,6 +1,136 @@
 import { useEffect, useRef, useState } from 'react'
 import usePipelineStore from '../store/pipelineStore'
 
+function DriveUploadPanel({ imageCount }) {
+  const [driveConfigured, setDriveConfigured] = useState(null)
+  const [uploading, setUploading] = useState(false)
+  const [uploadStatus, setUploadStatus] = useState({}) // scene_id -> {state, url}
+  const [uploadDone, setUploadDone] = useState(false)
+  const esRef = useRef(null)
+
+  useEffect(() => {
+    fetch('/api/drive-config').then(r => r.json()).then(d => setDriveConfigured(d.configured))
+  }, [])
+
+  const startUpload = async () => {
+    setUploading(true)
+    setUploadDone(false)
+    setUploadStatus({})
+
+    if (esRef.current) esRef.current.close()
+    const es = new EventSource('/api/drive-progress')
+    esRef.current = es
+
+    es.onmessage = (e) => {
+      const msg = JSON.parse(e.data)
+      if (msg.type === 'uploading') {
+        setUploadStatus(prev => ({ ...prev, [msg.scene_id]: { state: 'uploading' } }))
+      }
+      if (msg.type === 'uploaded') {
+        setUploadStatus(prev => ({ ...prev, [msg.scene_id]: { state: 'done', url: msg.url } }))
+      }
+      if (msg.type === 'upload_error') {
+        setUploadStatus(prev => ({ ...prev, [msg.scene_id]: { state: 'error', error: msg.error } }))
+      }
+      if (msg.type === 'done') {
+        setUploading(false)
+        setUploadDone(true)
+        es.close()
+      }
+      if (msg.type === 'error') {
+        setUploading(false)
+        alert(`Drive upload failed: ${msg.message}`)
+        es.close()
+      }
+    }
+    es.onerror = () => { setUploading(false); es.close() }
+
+    try {
+      const res = await fetch('/api/upload-to-drive', { method: 'POST' })
+      if (!res.ok) {
+        const d = await res.json()
+        setUploading(false)
+        alert(d.detail || 'Upload failed')
+        es.close()
+      }
+    } catch (err) {
+      setUploading(false)
+      alert(err.message)
+      es.close()
+    }
+  }
+
+  useEffect(() => () => { if (esRef.current) esRef.current.close() }, [])
+
+  if (driveConfigured === null) return null
+
+  const uploadedCount = Object.values(uploadStatus).filter(s => s.state === 'done').length
+  const errorCount = Object.values(uploadStatus).filter(s => s.state === 'error').length
+
+  return (
+    <div className="bg-white border border-stone-200 rounded-xl p-5 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="font-semibold text-stone-700">Save to Google Drive</h3>
+          {!driveConfigured && (
+            <p className="text-xs text-stone-400 mt-0.5">
+              Add <code className="bg-stone-100 px-1 rounded">GOOGLE_SERVICE_ACCOUNT_JSON</code> and{' '}
+              <code className="bg-stone-100 px-1 rounded">GOOGLE_DRIVE_FOLDER_ID</code> to <code className="bg-stone-100 px-1 rounded">.env</code> to enable.
+            </p>
+          )}
+        </div>
+        <button
+          onClick={startUpload}
+          disabled={!driveConfigured || uploading}
+          className={[
+            'px-4 py-2 rounded-xl text-sm font-semibold transition-colors',
+            driveConfigured && !uploading
+              ? 'bg-blue-600 text-white hover:bg-blue-500'
+              : 'bg-stone-200 text-stone-400 cursor-not-allowed',
+          ].join(' ')}
+        >
+          {uploading ? 'Uploading...' : uploadDone ? 'Upload Again' : 'Upload to Drive'}
+        </button>
+      </div>
+
+      {(uploading || uploadDone) && (
+        <>
+          <div className="flex justify-between text-xs text-stone-500 mb-1">
+            <span>{uploadedCount + errorCount} / {imageCount} uploaded</span>
+            {uploadDone && <span className="text-green-600 font-medium">{uploadedCount} saved</span>}
+          </div>
+          <div className="h-1.5 bg-stone-100 rounded-full overflow-hidden mb-3">
+            <div
+              className="h-full bg-blue-500 transition-all duration-300"
+              style={{ width: `${((uploadedCount + errorCount) / Math.max(1, imageCount)) * 100}%` }}
+            />
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(uploadStatus).map(([id, s]) => (
+              <div key={id} className="flex items-center gap-1 text-xs">
+                {s.state === 'uploading' && (
+                  <span className="w-3 h-3 border border-blue-400 border-t-transparent rounded-full animate-spin inline-block" />
+                )}
+                {s.state === 'done' && (
+                  <a href={s.url} target="_blank" rel="noreferrer"
+                    className="px-2 py-0.5 bg-green-50 border border-green-200 text-green-700 rounded hover:bg-green-100">
+                    scene_{String(id).padStart(3, '0')} ↗
+                  </a>
+                )}
+                {s.state === 'error' && (
+                  <span className="px-2 py-0.5 bg-red-50 border border-red-200 text-red-600 rounded" title={s.error}>
+                    scene_{String(id).padStart(3, '0')} ✕
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function ImageCell({ scene_id, concept, imageUrl, status, error, onRetry }) {
   return (
     <div className="relative bg-white border border-stone-200 rounded-xl overflow-hidden aspect-square group">
@@ -72,7 +202,7 @@ export default function Stage5_Images() {
   const esRef = useRef(null)
 
   const n = formattedPrompts.length
-  const costEstimate = (n * 0.02).toFixed(2)
+  const costEstimate = (n * 0.039).toFixed(2)
   const doneCount = Object.values(generatedImages).filter(Boolean).length
   const failedCount = Object.values(imageErrors).filter(Boolean).length
 
@@ -172,7 +302,7 @@ export default function Stage5_Images() {
             />
           </div>
           <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 text-sm text-amber-800">
-            Estimated cost: <strong>{n} × $0.02 = ${costEstimate}</strong>
+            Estimated cost: <strong>{n} × $0.039 = ${costEstimate}</strong>
           </div>
           <button
             onClick={generateAll}
@@ -231,6 +361,19 @@ export default function Stage5_Images() {
               />
             )
           })}
+        </div>
+      )}
+
+      {doneCount > 0 && (
+        <div className="flex items-center gap-3 mb-4">
+          <DriveUploadPanel imageCount={doneCount} />
+          <a
+            href="/api/download-images-zip"
+            download="scene_images.zip"
+            className="px-4 py-2 bg-stone-700 text-white text-sm rounded-xl font-semibold hover:bg-stone-600 transition-colors whitespace-nowrap"
+          >
+            Download All as ZIP
+          </a>
         </div>
       )}
 

@@ -1,22 +1,29 @@
 import asyncio
+import io
 import json
 import os
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
 import aiofiles
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+import google_drive as gd
 import image_generator as ig
 import parser as transcript_parser
 import prompt_formatter as pf
 import scene_builder as sb
 import video_assembler as va
+
+# Load .env from project root
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent.parent
@@ -48,6 +55,11 @@ _state: dict = {
 
 # SSE fan-out: set of queues, one per subscriber
 _sse_subscribers: set[asyncio.Queue] = set()
+
+# Drive upload SSE fan-out
+_drive_subscribers: set[asyncio.Queue] = set()
+_drive_running: bool = False
+_drive_last_error: list[str] = []
 
 # WebSocket fan-out for FFmpeg log streaming
 _ws_subscribers: set[asyncio.Queue] = set()
@@ -433,6 +445,116 @@ async def assemble_video_endpoint(body: AssemblePayload):
 
     asyncio.create_task(run())
     return {"message": "Assembly started", "format": body.format}
+
+
+# ─── Google Drive ─────────────────────────────────────────────────────────────
+
+async def _drive_broadcast(msg: str):
+    dead = set()
+    for q in _drive_subscribers:
+        try:
+            q.put_nowait(msg)
+        except asyncio.QueueFull:
+            dead.add(q)
+    for q in dead:
+        _drive_subscribers.discard(q)
+
+
+@app.get("/api/drive-errors")
+async def get_drive_errors():
+    return {"errors": _drive_last_error[-5:]}
+
+
+@app.get("/api/drive-config")
+async def get_drive_config():
+    creds = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    folder = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
+    return {"configured": bool(creds and folder), "folder_id": folder}
+
+
+@app.get("/api/drive-progress")
+async def drive_progress():
+    queue: asyncio.Queue = asyncio.Queue()
+    _drive_subscribers.add(queue)
+
+    async def event_generator():
+        try:
+            while True:
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    data = json.loads(msg)
+                    yield {"data": msg}
+                    if data.get("type") in ("done", "error"):
+                        break
+                except asyncio.TimeoutError:
+                    yield {"data": json.dumps({"type": "heartbeat"})}
+        finally:
+            _drive_subscribers.discard(queue)
+
+    return EventSourceResponse(event_generator())
+
+
+@app.post("/api/upload-to-drive")
+async def upload_to_drive():
+    global _drive_running
+    if _drive_running:
+        raise HTTPException(status_code=409, detail="Upload already in progress.")
+
+    creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
+    if not creds_path or not folder_id:
+        raise HTTPException(status_code=400, detail="Drive not configured. Add GOOGLE_SERVICE_ACCOUNT_JSON and GOOGLE_DRIVE_FOLDER_ID to .env")
+
+    images = sorted(IMAGES_DIR.glob("scene_*.png"))
+    if not images:
+        raise HTTPException(status_code=400, detail="No scene images found. Complete Stage 5 first.")
+
+    _drive_running = True
+    _drive_last_error.clear()
+
+    async def run():
+        global _drive_running
+        try:
+            loop = asyncio.get_running_loop()
+            service = await loop.run_in_executor(None, gd.get_service, creds_path)
+            await _drive_broadcast(json.dumps({"type": "started", "total": len(images)}))
+
+            for img_path in images:
+                scene_id = int(img_path.stem.split("_")[1])
+                await _drive_broadcast(json.dumps({"type": "uploading", "scene_id": scene_id}))
+                try:
+                    link = await loop.run_in_executor(None, gd.upload_file, service, img_path, folder_id)
+                    await _drive_broadcast(json.dumps({"type": "uploaded", "scene_id": scene_id, "url": link}))
+                except Exception as e:
+                    err_msg = f"{type(e).__name__}: {e}"
+                    _drive_last_error.append(err_msg)
+                    await _drive_broadcast(json.dumps({"type": "upload_error", "scene_id": scene_id, "error": err_msg}))
+
+            await _drive_broadcast(json.dumps({"type": "done", "total": len(images)}))
+        except Exception as e:
+            await _drive_broadcast(json.dumps({"type": "error", "message": str(e)}))
+        finally:
+            _drive_running = False
+
+    asyncio.create_task(run())
+    return {"message": "Upload started", "total": len(images)}
+
+
+@app.get("/api/download-images-zip")
+async def download_images_zip():
+    images = sorted(IMAGES_DIR.glob("scene_*.png"))
+    if not images:
+        raise HTTPException(status_code=404, detail="No scene images found.")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for img in images:
+            zf.write(img, img.name)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=scene_images.zip"},
+    )
 
 
 # ─── State ────────────────────────────────────────────────────────────────────
